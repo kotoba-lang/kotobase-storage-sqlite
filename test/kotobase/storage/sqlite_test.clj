@@ -31,12 +31,59 @@
   (with-database
     (fn [path]
       (let [checks (atom [])
-            backend (sqlite/open {:path path})]
+            backend (sqlite/open {:path path})
+            result (contract/verify backend
+                                    (fn [truthy label]
+                                      (swap! checks conj label)
+                                      (is truthy label)))]
+        ;; Assert what ran, not how many. A count is the wrong thing to
+        ;; pin: it turned the arrival of the concurrent half into a
+        ;; failure here, and it would have gone on reporting success if
+        ;; that half were ever skipped for this backend.
+        (is (= {:profile :linearizable-ref :concurrency :verified} result)
+            "the suite raced this backend rather than skipping it")
+        (is (some #(re-find #"concurrent writers" %) @checks)
+            "and the single-statement CAS was actually put under contention")))))
+
+;; ── does the race have teeth on THIS backend? ────────────────────────────────
+
+(defrecord Toctou [inner]
+  ;; The same real SQLite file underneath, with the CAS split into a read,
+  ;; a comparison, and a later write -- which is what the implementation
+  ;; would be if the `WHERE name = ? AND cid = ?` guard were lifted out of
+  ;; the statement and evaluated in Clojure. It passes every sequential
+  ;; check. If the race cannot catch it here, a green run above is not
+  ;; evidence of anything.
+  storage/IBlockStore
+  (-put-blocks! [_ blocks] (storage/-put-blocks! inner blocks))
+  (-get-blocks [_ cids] (storage/-get-blocks inner cids))
+
+  storage/IRefStore
+  (-read-ref [_ name] (storage/-read-ref inner name))
+  (-compare-and-set-ref! [_ name expected next]
+    (let [current (storage/-read-ref inner name)]
+      (if (not= expected (:cid current))
+        {:published? false :current (:cid current) :version (:version current)}
+        (do
+          ;; Decided. Widen the window the same way a network round trip
+          ;; would, then write with no guard at all.
+          (Thread/sleep 5)
+          (storage/-compare-and-set-ref! inner name (:cid current) next)
+          {:published? true :current next}))))
+
+  storage/IBackendCapabilities
+  (-capabilities [_] (storage/-capabilities inner)))
+
+(deftest a-read-then-write-cas-over-the-same-sqlite-is-rejected
+  (with-database
+    (fn [path]
+      (let [failures (atom [])
+            backend (->Toctou (sqlite/open {:path path}))]
         (contract/verify backend
                          (fn [truthy label]
-                           (swap! checks conj label)
-                           (is truthy label)))
-        (is (= 8 (count @checks)))))))
+                           (when-not truthy (swap! failures conj label))))
+        (is (some #(re-find #"exactly one of 4" %) @failures)
+            "4 threads all published and the suite accepted it")))))
 
 (deftest cid-collision-is-rejected-without-changing-stored-bytes
   (with-database
