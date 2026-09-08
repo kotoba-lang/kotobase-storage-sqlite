@@ -1,6 +1,6 @@
 (ns kotobase.storage.sqlite
   "SQLite implementation of immutable blocks and linearizable local refs."
-  (:require [clojure.string :as str]
+  (:require [kotoba.lang.text :as str]
             [kotobase.storage.core :as storage])
   (:import [java.sql Connection PreparedStatement ResultSet]
            [java.util Arrays]
