@@ -36,6 +36,6 @@ provider.
 Run the real file-backed conformance and engine persistence tests:
 
 ```sh
-clojure -M:test
+kbb -M:test
 ```
 
